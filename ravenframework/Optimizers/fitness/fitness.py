@@ -35,7 +35,7 @@ mh = getMessageHandler()
 #               We should make this method flexible to accept different set of params
 
 _defaultObjectiveScaling = 1.0
-_defaultPenaltyScaling = 1.0
+_defaultPenaltyScaling = 10.0
 
 # @profile
 def invLinear(rlz, **kwargs):
@@ -47,11 +47,10 @@ def invLinear(rlz, **kwargs):
   3. If the solution violates the constraints, the fitness decreases, making it less favorable.
   For maximization problems, the objective value is negated, inverting the trends.
   Formula:
-  fitness = -a_i * obj - \Sum_{j=1}^{nConstraint} b_(i,j) * max(0, -penalty_j)
+  fitness = -a * obj - b * \Sum_{j=1}^{nConstraint} max(0, -penalty_j)
   @ In, rlz, xr.Dataset, containing the evaluation of a set of individuals
   @ In, kwargs, dict, dictionary of parameters:
         objVar, list of strings or single string, name(s) of the objective variable(s)
-        constraintNum, int, number of constraints
         a, list of floats, linear coefficient(s) for the objective function (default = 1.0 for each objective)
         b, list of floats, linear coefficient(s) for the penalty measure (default = 10.0 for each objective)
         constraintFunction, xr.DataArray, measuring the severity of the constraint violation.
@@ -59,19 +58,13 @@ def invLinear(rlz, **kwargs):
   @ Out, fitnessSet, xr.Dataset, the fitness function for the given population.
   """
   objVar = kwargs['objVar']
-  constraintNum = kwargs['constraintNum']
-  g = kwargs['constraintFunction'] if constraintNum > 0 else None  # Constraint evaluations
-  a = np.array(kwargs.get('a')) if kwargs.get('a') is not None else np.array(_defaultObjectiveScaling)
-  a = np.array([a] * len(objVar)) if not a.shape else a # Scaling factors for objectives
-  if a.shape != (len(objVar),):
+  a = [_defaultObjectiveScaling] * len(objVar) if kwargs.get('a') is None else kwargs['a']  # Scaling factors for objectives
+  b = [_defaultPenaltyScaling] * len(objVar) if kwargs.get('b') is None else kwargs['b']  # Penalty scaling factors
+  if len(a) != len(objVar):
     mh.error("fitness", IOError, f"Objective scaling factors {a} should have length {len(objVar)}")
-  b = np.array(kwargs.get('b')) if kwargs.get('b') is not None else np.array(_defaultPenaltyScaling)
-  try:
-    b = np.array([[b] * constraintNum] * len(objVar)) if not b.shape \
-        else (np.array([b] * len(objVar)) if len(b.shape) == 1 else np.reshape(b, (len(objVar),constraintNum))) # Penalty scaling factors
-  except ValueError:
-     mh.error("fitness", IOError, f"Penalty scaling factors {b} must have length {len(objVar)} or {len(objVar)*constraintNum}.")
-
+  if len(b) != len(objVar):
+    mh.error("fitness", IOError, f"Penalty scaling factors {b} should have length {len(objVar)}")
+  g = kwargs['constraintFunction'] if 'constraintFunction' in kwargs else None  # Constraint evaluations
   fitnessSet = xr.Dataset()
   for i, obj in enumerate(objVar):
       data = np.atleast_1d(rlz[obj].data)  # Objective values
@@ -82,7 +75,7 @@ def invLinear(rlz, **kwargs):
           # Apply penalties for constraint violations, if any
           if g is not None and np.any(g.data[ind, :] < 0):  # Violating constraints
               for constInd in range(g.data.shape[1]):
-                  fit -= b[i][constInd] * max(0, -g.data[ind, constInd])  # Apply penalty for violation
+                  fit -= b[i] * max(0, -g.data[ind, constInd])  # Apply penalty for violation
           fitness[ind] = fit
       # Add the fitness for the current objective to the dataset
       fitnessSet[obj] = xr.DataArray(fitness, dims=['chromosome'], coords={'chromosome': np.arange(len(data))})
@@ -99,11 +92,17 @@ def feasibleFirst(rlz, **kwargs):
   For maximization problems, the objective value is negated, inverting the trends.
   Reference: Deb, Kalyanmoy. "An efficient constraint handling method for genetic algorithms."
 
+  This is a weighted generalization of Deb (2000): with a_i = 1 and b_i = 1 the two branches reduce
+  exactly to Deb's parameter-less scheme; a_i and b_i let the user re-weight the objective and the
+  penalty. Following Deb, obj_{worstFeasible} is the worst objective among the FEASIBLE individuals
+  (not the whole population), which guarantees every feasible solution outranks every infeasible one
+  and orders infeasibles purely by total violation. When no feasible individual exists yet, the
+  whole-population worst objective is used as a fallback anchor.
+
   .. math::
   fitness = \[ \\begin{cases}
-                -a_{i} \times obj & g_j(x)\\geq 0 \\forall j \\
-                -a_{i} \times obj_{worst} + \\Sigma_{j=1}^{J}b_{i,j} \times min<g_j(x)> & otherwise \\
-                min(0,g_j(x))
+                -a_i obj & g_j(x)\\geq 0 \\forall j \\
+                -a_i obj_{worstFeasible} - b_i \\Sigma_{j=1}^{J}<g_j(x)> & otherwise \\
                 \\end{cases}
             \];
   @ In, rlz, xr.Dataset, containing the evaluation of a set of individuals
@@ -112,29 +111,34 @@ def feasibleFirst(rlz, **kwargs):
         'constraintFunction', xr.DataArray, containing all constraint evaluations for the population
         'constraintNum', int, number of constraints
         'a', list of floats, scaling factors for the objectives
-        'b', list of floats, penalty factors for constraint violations with either length = len(objVar) or length = len(objVar)*constraintNum
+        'b', list of floats, penalty factors for constraint violations
         'type', list of strings, indicating 'min' or 'max' for each objective
   @ Out, fitnessSet, xr.Dataset, the fitness function for the given population.
   """
   objVar = kwargs['objVar']
+  a = [_defaultObjectiveScaling] * len(objVar) if kwargs.get('a') is None else kwargs['a']  # Scaling factors for objectives
+  b = [_defaultPenaltyScaling] * len(objVar) if kwargs.get('b') is None else kwargs['b']  # Penalty scaling factors
+  if len(a) != len(objVar):
+    mh.error("fitness", IOError, f"Objective scaling factors {a} should have length {len(objVar)}")
+  if len(b) != len(objVar):
+    mh.error("fitness", IOError, f"Penalty scaling factors {b} should have length {len(objVar)}")
   constraintNum = kwargs['constraintNum']
   g = kwargs['constraintFunction'] if constraintNum > 0 else None  # Constraint evaluations
-  a = np.array(kwargs.get('a')) if kwargs.get('a') is not None else np.array(_defaultObjectiveScaling)
-  a = np.array([a] * len(objVar)) if not a.shape else a # Scaling factors for objectives
-  if a.shape != (len(objVar),):
-    mh.error("fitness", IOError, f"Objective scaling factors {a} should have length {len(objVar)}")
-  b = np.array(kwargs.get('b')) if kwargs.get('b') is not None else np.array(_defaultPenaltyScaling)
-  try:
-    b = np.array([[b] * constraintNum] * len(objVar)) if not b.shape \
-        else (np.array([b] * len(objVar)) if len(b.shape) == 1 else np.reshape(b, (len(objVar),constraintNum))) # Penalty scaling factors
-  except ValueError:
-     mh.error("fitness", IOError, f"Penalty scaling factors {b} must have length {len(objVar)} or {len(objVar)*constraintNum}.")
-
   fitnessSet = xr.Dataset()
+  # Feasibility mask over the population: True where the individual satisfies all constraints.
+  # Deb (2000) anchors the infeasible penalty base at the WORST FEASIBLE objective, not the worst
+  # objective over the whole population, so that (a) every feasible solution dominates every infeasible
+  # one and (b) infeasibles are ordered purely by total violation. When no feasible solution exists yet
+  # (common in early generations) worst-feasible is undefined, so we fall back to the whole-population
+  # worst objective as a sane anchor.
+  if constraintNum == 0:
+    feasibleMask = np.ones(np.atleast_1d(rlz[objVar[0]].data).shape[0], dtype=bool)
+  else:
+    feasibleMask = np.all(g.data >= 0, axis=1)
   # For each objective
   for i, obj in enumerate(objVar):
       data = np.atleast_1d(rlz[obj].data)
-      worstObj = max(data) # Worst objective value for penalizing violating solutions
+      worstObj = max(data[feasibleMask]) if np.any(feasibleMask) else max(data) # Worst FEASIBLE objective (Deb 2000); whole-population worst as all-infeasible fallback
       fitness = np.zeros(data.shape)
       for ind in range(data.shape[0]):
           # If no contraints or all constraints are satisfied
@@ -143,9 +147,9 @@ def feasibleFirst(rlz, **kwargs):
           # if constraints are violated
           else:  # Penalize constraint violations
               fit = -a[i] * worstObj  # Start with the worst objective value
-              for constInd in range(constraintNum):
-                  violation = min(0, g.data[ind, constInd])
-                  fit += b[i][constInd] * violation #add the negative penalty
+              for constInd in range(g.data.shape[1]):
+                  violation = max(0, -g.data[ind, constInd])
+                  fit -= b[i] * violation
           fitness[ind] = fit
       # Add the fitness for the current objective to the dataset
       fitnessSet[obj] = xr.DataArray(fitness, dims=['chromosome'], coords={'chromosome': np.arange(len(data))})
