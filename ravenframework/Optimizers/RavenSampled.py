@@ -681,11 +681,17 @@ class RavenSampled(Optimizer):
           # candidate was rejected, and again on a different column (not
           # 'rejectReason') carrying None mixed with floats.
           arr = np.array(vals)
-          if arr.dtype.kind == 'O':
-            # Not natively HDF5-storable either way (string or otherwise) -- fall
-            # back to a string-safe encoding for every value, since this data is
-            # metadata for continuous SolutionExport output on restart, not
-            # optimizer state read back into any computation downstream.
+          if arr.dtype.kind in ('O', 'U'):
+            # 'O' (object): e.g. None mixed with strings or with numbers -- not
+            # natively HDF5-storable at all. 'U' (fixed-width unicode): numpy's
+            # own inferred dtype for a column of UNIFORM strings with no None
+            # mixed in (e.g. 'accepted'/'first'/'rejected') -- also not directly
+            # storable via a plain create_dataset(data=arr) call; h5py needs its
+            # own variable-length string_dtype() for any string data, object or
+            # unicode alike. Route both to the same string-safe encoding, since
+            # this data is metadata for continuous SolutionExport output on
+            # restart, not optimizer state read back into any computation
+            # downstream.
             strVals = ['' if v is None else str(v) for v in vals]
             seGrp.create_dataset(var, data=np.array(strVals, dtype=object),
                                  dtype=h5py.string_dtype())
