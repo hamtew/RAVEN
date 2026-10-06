@@ -669,8 +669,20 @@ class RavenSampled(Optimizer):
           for var, val in row.items():
             varData.setdefault(var, []).append(val)
         for var, vals in varData.items():
-          if isinstance(vals[0], str):
-            seGrp.create_dataset(var, data=np.array(vals, dtype=object),
+          # Check EVERY value, not just vals[0]: a column like 'rejectReason' is
+          # None for accepted candidates and a string for rejected ones, so
+          # checking only the first entry can misclassify a genuinely mixed
+          # None/string column as purely numeric, and np.array(vals) on that
+          # mix raises "Object dtype dtype('O') has no native HDF5 equivalent"
+          # (confirmed: this crashes on the first checkpoint write that follows
+          # any rejected candidate, not just on restore).
+          if any(isinstance(v, str) for v in vals):
+            # None has no meaningful string representation here (this is
+            # metadata for continuous output on restart, not optimizer state
+            # read back into any computation), so coerce it to '' rather than
+            # failing the whole checkpoint write.
+            strVals = ['' if v is None else str(v) for v in vals]
+            seGrp.create_dataset(var, data=np.array(strVals, dtype=object),
                                  dtype=h5py.string_dtype())
           else:
             seGrp.create_dataset(var, data=np.array(vals),
