@@ -175,6 +175,60 @@ with tempfile.TemporaryDirectory() as tmpDir:
   checkTrue('HDF5 round-trip retains the dedup cache entry', restoredKey in gaRead._evaluatedSubmissionData)
 
 #
+# Checkpoint write with a SolutionExport containing a mixed None/string column
+# (e.g. 'rejectReason': None for accepted candidates, a string for rejected ones).
+# Regression test for a bug where _writeCheckpoint checked only vals[0]'s type to
+# decide the string-vs-numeric HDF5 branch, so a column whose FIRST row happened to
+# be None (and a LATER row a string) fell into the numeric branch and crashed
+# np.array(vals) with "Object dtype dtype('O') has no native HDF5 equivalent" --
+# this crashed on an ordinary checkpoint write (any run with >=1 rejected candidate),
+# not just on restore. The prior round-trip test above doesn't exercise this at all
+# (makeGA() sets _solutionExport = None).
+#
+class _FakeSolutionExport:
+  """Minimal duck-typed stand-in for a RAVEN DataObject, exposing just the
+  .asDataset() surface _writeCheckpoint actually reads."""
+  def __init__(self, dataset):
+    self._dataset = dataset
+  def asDataset(self):
+    return self._dataset
+
+import xarray as xr  # noqa: E402
+
+mixedColumnDataset = xr.Dataset(
+  {
+    'rejectReason': ('RAVEN_sample_ID', [None, 'duplicate point']),
+    'obj1': ('RAVEN_sample_ID', [1.0, 2.0]),
+  },
+  coords={'RAVEN_sample_ID': [0, 1]},
+)
+
+with tempfile.TemporaryDirectory() as tmpDir:
+  checkpointPath = os.path.join(tmpDir, 'test_mixed_column.ravenrst')
+
+  gaWriteMixed = makeGA()
+  gaWriteMixed._checkpointFile = checkpointPath
+  gaWriteMixed._checkpointInterval = 1
+  gaWriteMixed._solutionExport = _FakeSolutionExport(mixedColumnDataset)
+
+  try:
+    gaWriteMixed._writeCheckpoint()
+    checkTrue('checkpoint write with a mixed None/string SolutionExport column does not raise', True)
+  except Exception as err:
+    print('checking bool', 'checkpoint write with a mixed None/string SolutionExport column does not raise',
+          '| unexpected exception:', err)
+    results['fail'] += 1
+
+  checkTrue('checkpoint file was written despite the mixed-type column', os.path.exists(checkpointPath))
+
+  if os.path.exists(checkpointPath):
+    import h5py as _h5py
+    with _h5py.File(checkpointPath, 'r') as hf:
+      rejectReasonVals = [v.decode() if isinstance(v, bytes) else v for v in hf['solutionExport']['rejectReason'][()]]
+      checkSame('mixed-type column: None coerced to empty string, string preserved',
+                rejectReasonVals, ['', 'duplicate point'])
+
+#
 # Validation failures: mismatched optimizer type, mismatched sampled-variable set
 #
 ga = makeGA()
