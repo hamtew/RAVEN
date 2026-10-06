@@ -229,6 +229,47 @@ with tempfile.TemporaryDirectory() as tmpDir:
                 rejectReasonVals, ['', 'duplicate point'])
 
 #
+# Checkpoint write with a SolutionExport column containing None mixed with numeric
+# (non-string) values -- e.g. a metadata field left unset for some rows. Confirmed
+# live: a second, DIFFERENT column than 'rejectReason' hit the identical
+# "Object dtype dtype('O') has no native HDF5 equivalent" crash this way, so the
+# fix must inspect the array numpy actually infers (arr.dtype.kind == 'O'), not
+# special-case strings alone.
+#
+noneMixedWithFloatsDataset = xr.Dataset(
+  {
+    'someMetadataField': ('RAVEN_sample_ID', [None, 3.5]),
+    'obj1': ('RAVEN_sample_ID', [1.0, 2.0]),
+  },
+  coords={'RAVEN_sample_ID': [0, 1]},
+)
+
+with tempfile.TemporaryDirectory() as tmpDir:
+  checkpointPath = os.path.join(tmpDir, 'test_none_float_column.ravenrst')
+
+  gaWriteNoneFloat = makeGA()
+  gaWriteNoneFloat._checkpointFile = checkpointPath
+  gaWriteNoneFloat._checkpointInterval = 1
+  gaWriteNoneFloat._solutionExport = _FakeSolutionExport(noneMixedWithFloatsDataset)
+
+  try:
+    gaWriteNoneFloat._writeCheckpoint()
+    checkTrue('checkpoint write with a None/float-mixed SolutionExport column does not raise', True)
+  except Exception as err:
+    print('checking bool', 'checkpoint write with a None/float-mixed SolutionExport column does not raise',
+          '| unexpected exception:', err)
+    results['fail'] += 1
+
+  checkTrue('checkpoint file was written despite the None/float-mixed column', os.path.exists(checkpointPath))
+
+  if os.path.exists(checkpointPath):
+    import h5py as _h5py
+    with _h5py.File(checkpointPath, 'r') as hf:
+      fieldVals = [v.decode() if isinstance(v, bytes) else v for v in hf['solutionExport']['someMetadataField'][()]]
+      checkSame('None/float-mixed column: None coerced to empty string, float stringified',
+                fieldVals, ['', '3.5'])
+
+#
 # Validation failures: mismatched optimizer type, mismatched sampled-variable set
 #
 ga = makeGA()

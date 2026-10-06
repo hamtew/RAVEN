@@ -669,23 +669,28 @@ class RavenSampled(Optimizer):
           for var, val in row.items():
             varData.setdefault(var, []).append(val)
         for var, vals in varData.items():
-          # Check EVERY value, not just vals[0]: a column like 'rejectReason' is
-          # None for accepted candidates and a string for rejected ones, so
-          # checking only the first entry can misclassify a genuinely mixed
-          # None/string column as purely numeric, and np.array(vals) on that
-          # mix raises "Object dtype dtype('O') has no native HDF5 equivalent"
-          # (confirmed: this crashes on the first checkpoint write that follows
-          # any rejected candidate, not just on restore).
-          if any(isinstance(v, str) for v in vals):
-            # None has no meaningful string representation here (this is
-            # metadata for continuous output on restart, not optimizer state
-            # read back into any computation), so coerce it to '' rather than
-            # failing the whole checkpoint write.
+          # Decide the HDF5 encoding from the array numpy actually infers, not from
+          # inspecting only vals[0]'s type: a column like 'rejectReason' is None for
+          # accepted candidates and a string for rejected ones, and other metadata
+          # fields can similarly carry None mixed with numeric values for some rows.
+          # Checking only the first entry (the original code) can misclassify such a
+          # column as purely numeric whenever row 0 happens not to reveal the mix,
+          # and np.array(vals) on a genuine None/non-None-type mix produces dtype
+          # 'O' (object), which h5py cannot store natively -- confirmed this crashed
+          # an ordinary checkpoint write (not just a restore) the moment any
+          # candidate was rejected, and again on a different column (not
+          # 'rejectReason') carrying None mixed with floats.
+          arr = np.array(vals)
+          if arr.dtype.kind == 'O':
+            # Not natively HDF5-storable either way (string or otherwise) -- fall
+            # back to a string-safe encoding for every value, since this data is
+            # metadata for continuous SolutionExport output on restart, not
+            # optimizer state read back into any computation downstream.
             strVals = ['' if v is None else str(v) for v in vals]
             seGrp.create_dataset(var, data=np.array(strVals, dtype=object),
                                  dtype=h5py.string_dtype())
           else:
-            seGrp.create_dataset(var, data=np.array(vals),
+            seGrp.create_dataset(var, data=arr,
                                  compression='gzip', compression_opts=4)
     self.raiseAMessage(f'Checkpoint written to "{self._checkpointFile}" '
                        f'(generation {generation}, {len(rows)} SolutionExport row(s) saved).')
