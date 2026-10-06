@@ -270,6 +270,48 @@ with tempfile.TemporaryDirectory() as tmpDir:
                 fieldVals, ['', '3.5'])
 
 #
+# Checkpoint write with a SolutionExport column of UNIFORM strings and no None at
+# all (e.g. 'accepted': 'first'/'accepted'/'rejected' for every row). Regression
+# test for a mistake in the dtype.kind == 'O' fix above: numpy infers a column of
+# uniform-length strings with no None mixed in as dtype '<U...' (fixed-width
+# unicode), NOT object dtype -- confirmed live ("TypeError: No conversion path for
+# dtype: dtype('<U5')") once the object-dtype-only fix let this case fall through
+# to the plain create_dataset(data=arr) branch. Both 'O' and 'U' dtype kinds need
+# the string-safe path.
+#
+uniformStringDataset = xr.Dataset(
+  {
+    'accepted': ('RAVEN_sample_ID', ['first', 'first']),
+    'obj1': ('RAVEN_sample_ID', [1.0, 2.0]),
+  },
+  coords={'RAVEN_sample_ID': [0, 1]},
+)
+
+with tempfile.TemporaryDirectory() as tmpDir:
+  checkpointPath = os.path.join(tmpDir, 'test_uniform_string_column.ravenrst')
+
+  gaWriteUniformStr = makeGA()
+  gaWriteUniformStr._checkpointFile = checkpointPath
+  gaWriteUniformStr._checkpointInterval = 1
+  gaWriteUniformStr._solutionExport = _FakeSolutionExport(uniformStringDataset)
+
+  try:
+    gaWriteUniformStr._writeCheckpoint()
+    checkTrue('checkpoint write with a uniform-string (no None) SolutionExport column does not raise', True)
+  except Exception as err:
+    print('checking bool', 'checkpoint write with a uniform-string (no None) SolutionExport column does not raise',
+          '| unexpected exception:', err)
+    results['fail'] += 1
+
+  checkTrue('checkpoint file was written despite the uniform-string column', os.path.exists(checkpointPath))
+
+  if os.path.exists(checkpointPath):
+    import h5py as _h5py
+    with _h5py.File(checkpointPath, 'r') as hf:
+      acceptedVals = [v.decode() if isinstance(v, bytes) else v for v in hf['solutionExport']['accepted'][()]]
+      checkSame('uniform-string column round-trips unchanged', acceptedVals, ['first', 'first'])
+
+#
 # Validation failures: mismatched optimizer type, mismatched sampled-variable set
 #
 ga = makeGA()
